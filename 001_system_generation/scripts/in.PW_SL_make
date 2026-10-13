@@ -1,0 +1,166 @@
+# Partially permeable phantom-wall (PPPW) method: Pt-Ar solid-liquid system
+# make stage: sweep the PW and write one configuration per PW position
+
+# --- settings (override with -v) ---------------------------------------------
+variable eta       index 0.2      # solid-liquid interaction scaling factor
+variable per       index 20       # permeability of the PW [%]
+variable pos_pwall index 13.0     # first PW position [A]
+variable dpos      index 0.1      # PW shift per position [A]
+variable npos      index 171      # number of PW positions
+variable tag       index eta${eta}_per${per}
+variable init_data index data.relaxed_eta${eta}
+
+# randomize seeds
+python get_random_integer return v_random_integer format i here """
+def get_random_integer():
+  import random
+  # limits from random_mars.cpp
+  return random.randint(1, 900000000)
+"""
+variable random_integer python get_random_integer
+
+units      real
+atom_style molecular
+boundary   p p fs
+
+# constants
+variable atm  index 101325 #Pa
+variable kcal index 4184 #J
+variable N_A  index 6.022140857e+23
+variable pi   index 3.141592653589793
+
+# control temperature
+variable temp index 85
+# control pressure
+variable press index 1e6 #Pa
+variable tdamp index 100
+
+variable dt    index 1
+variable tstep index 1000
+# steps held at each PW position
+variable sstep index 1000000
+
+bond_style harmonic
+pair_style lj/smooth/linear 12
+special_bonds lj 0 0 0
+
+# read the relaxed system
+read_data ${init_data}
+
+group solid   type 1
+group fluid   type 2
+group virtual type 3
+
+# parameters for pair interactions and bonds
+variable r0_ss   index 2.77
+variable ndens   index $(1/v_r0_ss^2)
+variable k_ss    index 67.36 #46.8 N/m
+
+variable sig_ff  index 3.40  #0.340 nm
+variable sig_ss  index 3.50  #0.350 nm
+variable sig_fs  index $(0.5*(v_sig_ff+v_sig_ss))
+variable sig_fw  index ${sig_fs}
+variable eps_ff  index 0.240 #1.67x10^-21 J
+variable eps_ss  index 0.144 #1.000x10^-21 J
+variable eps0_fs index $(sqrt(v_eps_ff*v_eps_ss))
+variable eps_fs  index $(v_eta*v_eps0_fs)
+variable eps_fw  index $(2*v_pi/3*v_ndens*v_sig_fw^3*v_eps0_fs)
+variable rc_ff   index $(3.5*v_sig_ff)
+variable rc_ss   index ${r0_ss}
+variable rc_fs   index $(3.5*v_sig_fs)
+
+# solid-solid (Pt atoms are connected by harmonic bonds instead)
+pair_coeff 1 1 0 0
+# fluid-solid
+pair_coeff 1 2 ${eps_fs} ${sig_fs} ${rc_fs}
+# fluid-fluid
+pair_coeff 2 2 ${eps_ff} ${sig_ff} ${rc_ff}
+# virtual particle
+pair_coeff 3 * 0 0
+
+# couple the upper LJ wall (piston) with the virtual particle
+# virtual particle is the last atom
+variable nsolid index $(count(solid))
+variable nfluid index $(count(fluid))
+variable z_virtual  equal z[$(v_nsolid+v_nfluid+1)]
+# upper lj wall only interacts with fluid atoms
+fix uwall fluid wall/lj93 zhi v_z_virtual ${eps_fw} ${sig_fw} $(3.5*v_sig_fw)
+
+variable A index $(lx*ly)
+# kcal/mol -> J                  kcal->J       1/mol->1
+variable ene_real2si         index $(v_kcal/v_N_A)
+# kcal/mol -> J/m^2              kcal/mol->J   1->1/A^2 1/A^2->1/m^2
+variable ene2edens_real2si   index $(v_ene_real2si/v_A*1e20)
+# kcal/mol/A -> N                kcal/mol->J   1/A->1/m
+variable force_real2si       index $(v_ene_real2si*1e10)
+# kcal/mol/A -> Pa               kcal/mol/A->N 1->1/A 1/A->m
+variable force2press_real2si index $(v_force_real2si/v_A*1e20)
+
+# pressure control via virtual atom
+variable force index $(v_press/v_force2press_real2si)
+
+# the force on virtual atom is force on lj wall + control force(z minus derection)
+variable virtual_force equal f_uwall[1]-v_force
+fix set_virtual_force virtual setforce 0 0 v_virtual_force
+
+# find first bottom layer and fix it
+region first_bottom plane 0 0 $(bound(solid,zmin)+0.5) 0 0 -1
+group first_bottom region first_bottom
+
+# find second bottom layer and control temperature
+region second_bottom plane 0 0 $(bound(solid,zmin)+2.5) 0 0 -1
+group second_bottom region second_bottom
+group second_bottom subtract second_bottom first_bottom
+
+# heat bath for second bottom layer
+fix second_bottom second_bottom langevin ${temp} ${temp} ${tdamp} ${random_integer}
+
+# set top heat bath layer (fluid within 20 A below the piston)
+variable is_hbath atom z>$(v_z_virtual-20)
+group hbath_atoms dynamic fluid var is_hbath every 1
+fix hbath hbath_atoms langevin ${temp} ${temp} ${tdamp} ${random_integer}
+
+# integrate all atoms except first_bottom
+group integ subtract all first_bottom
+fix integ integ nve
+fix balance all balance 100 1.0 shift z 10 1.1
+
+# fluid atoms interacting with the PW: the first (100-per)% of fluid ids
+# (fluid ids follow the solid ids; per=0 -> all fluid, impermeable PW)
+group fluid_int id $(v_nsolid+1):$(v_nsolid+round(v_nfluid*(100-v_per)/100))
+
+# phantom wall interacts only with fluid in group fluid_int.
+# cut-off at the potential minimum, sig*(2/5)^(1/6) -> purely repulsive
+variable pos_cur equal ${pos_pwall}
+fix pwall fluid_int wall/lj93 zlo ${pos_cur} ${eps_fw} ${sig_fw} $(v_sig_fw*(2/5)^(1/6))
+
+compute fgroup fluid group/group solid
+variable press_fs    equal c_fgroup[3]*v_force2press_real2si
+variable press_uwall equal f_uwall[1]*v_force2press_real2si
+# pressure exerted on the PW [Pa] (sign: force on the wall, i.e. negative)
+variable press_pwall equal f_pwall[1]*v_force2press_real2si
+
+thermo ${tstep}
+timestep ${dt}
+
+# =============================================================================
+#  sweep the PW from ${pos_pwall} by ${dpos}, ${npos} positions,
+#  writing data.${tag}_<pos> at every position
+# =============================================================================
+thermo_style custom step temp pe ke etotal pzz v_z_virtual v_press_fs v_press_uwall v_press_pwall
+dump traj all atom $(ceil(v_sstep*v_npos/1000)) traj.${tag}.lammpstrj
+
+label loop_start
+  variable i loop ${npos}
+  print "Running for PW position = $(v_pos_cur)"
+  run ${sstep}
+  # output data and restart files
+  variable filename format pos_cur %.1f
+  write_data data.${tag}_${filename}
+  write_restart restart.${tag}_${filename}
+  # update phantom wall position and fix
+  variable pos_cur equal $(v_pos_pwall+v_dpos*round(v_i))
+  unfix pwall
+  fix pwall fluid_int wall/lj93 zlo ${pos_cur} ${eps_fw} ${sig_fw} $(v_sig_fw*(2/5)^(1/6))
+next i
+jump SELF loop_start

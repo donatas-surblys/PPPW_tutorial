@@ -1,0 +1,9 @@
+PW positions        : 124 (13.0 - 30.0 A)
+Averaging           : first 10000 thermo rows skipped, 4 blocks
+Piston displacement : 1.8520 nm (8.2068 -> 10.0588 nm)
+
+int P_PW dz         = 5.9279e-03 +- 2.6e-05 J/m^2
+P_set * dz_piston   = 1.8520e-03 +- 2.2e-05 J/m^2
+
+Work of adhesion W  = 4.0759e-03 +- 1.2e-05 J/m^2  (trapezoidal rule, +- standard error)
+                    = 4.076 +- 0.012 mJ/m^2
